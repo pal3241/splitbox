@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "split_screen.h"
+#include "openmouse_bridge.h"
 
 #pragma comment(lib, "Comctl32.lib")
 #pragma comment(lib, "Dwmapi.lib")
@@ -19,10 +20,11 @@ namespace {
 
 using splitbox::SplitLayout;
 using splitbox::SplitScreenManager;
+using splitbox::OpenMouseBridge;
 
 constexpr wchar_t kAppClass[] = L"SplitBoxMainWindow";
 constexpr wchar_t kAddClass[] = L"SplitBoxAddAccountWindow";
-constexpr wchar_t kVersion[] = L"v0.2.0";
+constexpr wchar_t kVersion[] = L"v0.3.0";
 
 enum ControlId : int {
     ID_TAB_ACCOUNTS = 100,
@@ -54,7 +56,11 @@ enum ControlId : int {
     ID_SPLIT_LAYOUT,
     ID_EXPERIMENTAL_ROUTING,
     ID_SPLIT_START,
-    ID_SPLIT_STOP
+    ID_SPLIT_STOP,
+    ID_OPENMOUSE_IDENTIFY,
+    ID_OPENMOUSE_PROBE,
+    ID_OPENMOUSE_PROBE_ECHO,
+    ID_OPENMOUSE_CONFIG
 };
 
 struct Account {
@@ -118,8 +124,13 @@ HWND g_splitStart{};
 HWND g_splitStop{};
 HWND g_splitStatus{};
 HWND g_inputStatus{};
+HWND g_openMouseIdentify{};
+HWND g_openMouseProbe{};
+HWND g_openMouseProbeEcho{};
+HWND g_openMouseConfig{};
 
 SplitScreenManager g_split;
+OpenMouseBridge g_openMouse;
 
 std::filesystem::path DataDir() {
     wchar_t path[MAX_PATH]{};
@@ -521,8 +532,9 @@ void RefreshSplitSelectors() {
 
     std::wstring status =
         L"Detected " + std::to_wstring(windows.size()) + L" Roblox window(s), " +
-        std::to_wstring(keyboards.size()) + L" keyboard(s), " +
-        std::to_wstring(mice.size()) + L" mouse/mice.";
+        std::to_wstring(keyboards.size()) + L" keyboard interface(s), " +
+        std::to_wstring(mice.size()) + L" mouse interface(s).  openMouse: " +
+        (g_openMouse.available() ? (g_openMouse.running() ? L"running" : L"ready") : L"missing");
     SetWindowTextW(g_splitStatus, status.c_str());
 
     SetWindowTextW(g_inputStatus, g_split.inputStatus().c_str());
@@ -557,15 +569,39 @@ bool ReadSplitAssignments() {
     if (p1Ms >= 0 && static_cast<size_t>(p1Ms) < g_split.mice().size()) p1Mouse = g_split.mice()[static_cast<size_t>(p1Ms)].handle;
     if (p2Ms >= 0 && static_cast<size_t>(p2Ms) < g_split.mice().size()) p2Mouse = g_split.mice()[static_cast<size_t>(p2Ms)].handle;
 
+    // openMouse owns physical mouse routing. SplitBox keeps Raw Input enumeration
+    // only as a visual diagnostic, and never injects a second input stream.
     g_split.setAssignments(p1Keyboard, p1Mouse, p2Keyboard, p2Mouse);
-
-    bool experimental = SendMessageW(g_experimentalRouting, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    g_split.setExperimentalRouting(experimental);
+    g_split.setExperimentalRouting(false);
     return true;
 }
 
 void StartSplitScreen() {
     if (!ReadSplitAssignments()) return;
+
+    if (!g_openMouse.available()) {
+        MessageBoxW(
+            g_main,
+            L"openmouse.exe is missing next to SplitBox.exe. Re-download the complete SplitBox build artifact.",
+            L"SplitBox",
+            MB_OK | MB_ICONERROR
+        );
+        return;
+    }
+
+    const bool keyboardSteering =
+        SendMessageW(g_experimentalRouting, BM_GETCHECK, 0, 0) == BST_CHECKED;
+
+    std::wstring openMouseError;
+    if (!g_openMouse.setKeyboardSteering(keyboardSteering, openMouseError)) {
+        MessageBoxW(g_main, openMouseError.c_str(), L"openMouse configuration", MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    if (!g_openMouse.start(openMouseError)) {
+        MessageBoxW(g_main, openMouseError.c_str(), L"openMouse", MB_OK | MB_ICONERROR);
+        return;
+    }
 
     LPARAM p1Window = ComboData(g_p1Window);
     LPARAM p2Window = ComboData(g_p2Window);
@@ -586,9 +622,9 @@ void StartSplitScreen() {
 
     SetWindowTextW(
         g_splitStatus,
-        g_split.experimentalRouting()
-            ? L"Split screen ACTIVE. Experimental per-device keyboard/button routing is enabled."
-            : L"Split screen ACTIVE. Windows are isolated visually; Raw Input assignments are being monitored."
+        keyboardSteering
+            ? L"Split screen ACTIVE with openMouse. Multi-pointer mouse is ON; keyboard steering is ON."
+            : L"Split screen ACTIVE with openMouse. Multi-pointer mouse is ON; keyboard steering is off."
     );
 
     EnableWindow(g_splitStart, FALSE);
@@ -601,9 +637,15 @@ void StartSplitScreen() {
 
 void StopSplitScreen() {
     g_split.stop();
+
+    std::wstring openMouseError;
+    if (!g_openMouse.stop(openMouseError) && !openMouseError.empty()) {
+        MessageBoxW(g_main, openMouseError.c_str(), L"openMouse", MB_OK | MB_ICONWARNING);
+    }
+
     EnableWindow(g_splitStart, TRUE);
     EnableWindow(g_splitStop, FALSE);
-    SetWindowTextW(g_splitStatus, L"Split screen stopped. Original Roblox window positions restored.");
+    SetWindowTextW(g_splitStatus, L"Split screen stopped. Roblox windows restored and openMouse stopped.");
     UpdateGlobalStatus();
 }
 
@@ -711,7 +753,13 @@ void Layout(HWND hwnd) {
     MoveWindow(g_splitLayout, left, y + 24, 250, 200, TRUE);
     MoveWindow(g_experimentalRouting, left + 280, y + 22, W - left - 320, 48, TRUE);
 
-    y += 76;
+    y += 72;
+    MoveWindow(g_openMouseIdentify, left, y, 145, 34, TRUE);
+    MoveWindow(g_openMouseProbe, left + 155, y, 110, 34, TRUE);
+    MoveWindow(g_openMouseProbeEcho, left + 275, y, 120, 34, TRUE);
+    MoveWindow(g_openMouseConfig, left + 405, y, 150, 34, TRUE);
+
+    y += 50;
     MoveWindow(g_splitStart, left, y, 180, 42, TRUE);
     MoveWindow(g_splitStop, left + 195, y, 180, 42, TRUE);
     MoveWindow(g_splitStatus, left + 400, y - 4, W - left - 440, 46, TRUE);
@@ -762,7 +810,7 @@ void CreateSplitUi(HWND hwnd) {
 
     g_splitHelp = MakeControl(
         0, L"STATIC",
-        L"Select two running Roblox clients. SplitBox can tile them borderlessly and identify separate physical keyboards/mice using Windows Raw Input.",
+        L"Select two running Roblox clients. SplitBox handles the window layout; openMouse handles independent physical mouse pointers and click ownership.",
         WS_CHILD | SS_LEFT,
         40, 105, 900, 46, hwnd, 0
     );
@@ -801,27 +849,34 @@ void CreateSplitUi(HWND hwnd) {
 
     g_experimentalRouting = add(MakeControl(
         0, L"BUTTON",
-        L"Experimental per-device input routing (keyboard + mouse buttons; mouse-look remains focus-sensitive)",
+        L"Enable openMouse keyboard steering (focus steering only; Windows still has one foreground keyboard stream)",
         WS_CHILD | BS_AUTOCHECKBOX,
         320, 458, 760, 48,
         hwnd,
         ID_EXPERIMENTAL_ROUTING
     ));
 
-    g_splitStart = add(MakeControl(0, L"BUTTON", L"Start Split Screen", WS_CHILD | BS_PUSHBUTTON, 40, 535, 180, 42, hwnd, ID_SPLIT_START));
-    g_splitStop = add(MakeControl(0, L"BUTTON", L"Stop / Restore", WS_CHILD | BS_PUSHBUTTON, 235, 535, 180, 42, hwnd, ID_SPLIT_STOP));
+    g_openMouseIdentify = add(MakeControl(0, L"BUTTON", L"Identify devices", WS_CHILD | BS_PUSHBUTTON, 40, 515, 145, 34, hwnd, ID_OPENMOUSE_IDENTIFY));
+    g_openMouseProbe = add(MakeControl(0, L"BUTTON", L"Probe", WS_CHILD | BS_PUSHBUTTON, 195, 515, 110, 34, hwnd, ID_OPENMOUSE_PROBE));
+    g_openMouseProbeEcho = add(MakeControl(0, L"BUTTON", L"Probe echo", WS_CHILD | BS_PUSHBUTTON, 315, 515, 120, 34, hwnd, ID_OPENMOUSE_PROBE_ECHO));
+    g_openMouseConfig = add(MakeControl(0, L"BUTTON", L"openMouse config", WS_CHILD | BS_PUSHBUTTON, 445, 515, 150, 34, hwnd, ID_OPENMOUSE_CONFIG));
+
+    g_splitStart = add(MakeControl(0, L"BUTTON", L"Start Split Screen", WS_CHILD | BS_PUSHBUTTON, 40, 565, 180, 42, hwnd, ID_SPLIT_START));
+    g_splitStop = add(MakeControl(0, L"BUTTON", L"Stop / Restore", WS_CHILD | BS_PUSHBUTTON, 235, 565, 180, 42, hwnd, ID_SPLIT_STOP));
     EnableWindow(g_splitStop, FALSE);
 
     g_splitStatus = add(MakeControl(
         0, L"STATIC",
         L"Press Refresh after both Roblox clients are open.",
         WS_CHILD | SS_LEFT,
-        440, 535, 750, 46,
+        440, 565, 750, 46,
         hwnd,
         0
     ));
 
-    g_inputStatus = add(MakeControl(0, L"STATIC", L"Raw input: P1 0 events  ·  P2 0 events", WS_CHILD | SS_LEFT, 40, 595, 900, 26, hwnd, 0, g_fontSmall));
+    g_inputStatus = add(MakeControl(0, L"STATIC", L"Raw input diagnostic: P1 0 events  ·  P2 0 events", WS_CHILD | SS_LEFT, 40, 625, 900, 26, hwnd, 0, g_fontSmall));
+
+    SendMessageW(g_experimentalRouting, BM_SETCHECK, g_openMouse.keyboardSteeringEnabled() ? BST_CHECKED : BST_UNCHECKED, 0);
 }
 
 void CreatePlaceholderUi(HWND hwnd) {
@@ -990,6 +1045,38 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case ID_SPLIT_STOP:
             StopSplitScreen();
             return 0;
+
+        case ID_OPENMOUSE_IDENTIFY: {
+            std::wstring error;
+            if (!g_openMouse.identify(error)) {
+                MessageBoxW(g_main, error.c_str(), L"openMouse Identify", MB_OK | MB_ICONERROR);
+            }
+            return 0;
+        }
+
+        case ID_OPENMOUSE_PROBE: {
+            std::wstring error;
+            if (!g_openMouse.probe(error)) {
+                MessageBoxW(g_main, error.c_str(), L"openMouse Probe", MB_OK | MB_ICONERROR);
+            }
+            return 0;
+        }
+
+        case ID_OPENMOUSE_PROBE_ECHO: {
+            std::wstring error;
+            if (!g_openMouse.probeEcho(error)) {
+                MessageBoxW(g_main, error.c_str(), L"openMouse Probe Echo", MB_OK | MB_ICONERROR);
+            }
+            return 0;
+        }
+
+        case ID_OPENMOUSE_CONFIG: {
+            std::wstring error;
+            if (!g_openMouse.openConfigFolder(error)) {
+                MessageBoxW(g_main, error.c_str(), L"openMouse", MB_OK | MB_ICONERROR);
+            }
+            return 0;
+        }
         }
 
         break;
@@ -1039,6 +1126,10 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_CLOSE:
         if (g_split.active()) g_split.stop();
+        if (g_openMouse.running()) {
+            std::wstring ignored;
+            g_openMouse.stop(ignored);
+        }
         DestroyWindow(hwnd);
         return 0;
 
