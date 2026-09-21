@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_executable(SplitBox WIN32
     src/main.cpp
+    src/split_screen.cpp
 )
 
 target_compile_definitions(SplitBox PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
