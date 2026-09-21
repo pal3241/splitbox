@@ -21,8 +21,24 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item build/Release/SplitBox.exe dist/SplitBox.exe
-          Set-Content -Path dist/README.txt -Value "SplitBox v0.1.0 - Windows x64"
+          Copy-Item build/bin/SplitBox.exe dist/SplitBox.exe
+          Copy-Item build/bin/openmouse.exe dist/openmouse.exe
+          Copy-Item THIRD_PARTY_NOTICES.md dist/THIRD_PARTY_NOTICES.md
+          Set-Content -Path dist/README.txt -Value @"
+          SplitBox v0.3.0 - Windows x64
+
+          Includes openMouse (MIT) as the multi-pointer input engine.
+
+          First run:
+          1. Launch two Roblox clients.
+          2. Open SplitBox > Split Screen.
+          3. Click Probe and Probe echo once.
+          4. Click Identify devices and bind both seats.
+          5. Choose the two Roblox windows.
+          6. Start Split Screen.
+
+          Panic shortcut from openMouse: Ctrl+Alt+Shift+Q
+          "@
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
